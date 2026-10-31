@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Reject sensitive paths and content in every Git-index blob, without printing values."""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+DENIED_DIRECTORIES = frozenset(
+    {
+        ".aws", ".azure", ".gcp", ".ssh", ".neurocore", "credentials", "secrets",
+        "instance", "instances", "user_data", "user-data", "userdata", "user_instances",
+        "user-instances", "data", "runtime", "database", "databases", "db", "log", "logs",
+        "cache", "caches", ".cache", "__pycache__", ".pytest_cache", ".mypy_cache",
+        ".ruff_cache", ".venv", "venv", ".tox", ".nox", "backup", "backups", "output",
+        "outputs", "export", "exports", "chat_exports", "chat-exports", "node_modules",
+        "build", "dist", ".wheel-venv", "tmp", ".tmp", "temp", "verification",
+        "local-assets", "generated-assets",
+    }
+)
+DENIED_FILENAMES = (
+    ".env", ".env.*", "*.env", "credentials*", "secrets*", "id_rsa*", "id_ed25519*",
+    "*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore", "*.db", "*.db-*",
+    "*.sqlite", "*.sqlite3", "*.sqlite-*", "*.sqlite3-*", "*.log", "*.log.*", "*.bak",
+    "*.backup", "*.old", "*.orig", "*.swp", "*.tmp", "*.dump", "*.dump.sql",
+    "chat*.json", "conversation*.json", "messages*.json", "history*.json",
+    "chat*.jsonl", "conversation*.jsonl", "messages*.jsonl", "history*.jsonl",
+    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.ico", "*.bmp", "*.tiff",
+    "*.mp4", "*.mov", "*.webm", "*.mp3", "*.wav", "*.ogg", "*.flac", "*.glb",
+    "*.gltf", "*.blend", "*.fbx", "*.obj", "*.psd", "*.safetensors", "*.pt", "*.pth",
+    "*.zip", "*.7z", "*.tar", "*.gz", "*.bz2", "*.xz", "*.pdf", "*.docx", "*.xlsx",
+    "*.svg", "*.onnx", "*.gguf", "*.bin",
+)
+CONTENT_RULES = (
+    ("private-key", re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")),
+    ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+    ("github-token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")),
+    ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("service-secret-key", re.compile(r"\b(?:sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,}|(?:sk|rk)_live_[A-Za-z0-9]{16,})\b")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
+    ("url-credentials", re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@", re.I)),
+)
+ASSIGNMENT = re.compile(
+    r"(?<![\w-])['\"]?(?:[A-Za-z][\w.-]*[_-])?"
+    r"(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret(?:[_-]?key)?|token|password|passwd|pwd|client[_-]?secret|private[_-]?key)"
+    r"['\"]?\s*(?:=|:)\s*"
+    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;#}\]]+)",
+    re.I,
+)
+PLACEHOLDERS = frozenset(
+    {"", "example", "example_value", "replace_me", "replace-me", "your_api_key", "redacted", "changeme"}
+)
+MAX_BLOB_BYTES = 4 * 1024 * 1024
+
+
+def git(repo: Path, *args: str) -> bytes:
+    """Do not forward Git stderr: diagnostics can contain untrusted file content."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError("git-operation-failed")
+    return result.stdout
+
+
+def safe_placeholder(raw: str) -> bool:
+    value = raw[1:-1] if raw[:1] in {"'", '"'} and raw[-1:] == raw[:1] else raw
+    if value.lower() in PLACEHOLDERS or re.fullmatch(r"<[A-Z][A-Z0-9_ -]*>", value):
+        return True
+    if re.fullmatch(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})", value):
+        return True
+    # These unquoted expressions reference runtime configuration, not stored values.
+    return raw[:1] not in {"'", '"'} and (
+        raw in {"None", "null", "True", "False", "..."}
+        or raw.startswith(("os.environ[", "os.environ.get(", "os.getenv(", "getenv(", "process.env."))
+    )
+
+
+def content_violations(blob: bytes) -> set[str]:
+    if len(blob) > MAX_BLOB_BYTES:
+        return {"oversized-blob"}
+    if any(byte < 32 and byte not in (9, 10, 13) or byte == 127 for byte in blob):
+        return {"binary-content"}
+    try:
+        text = blob.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return {"non-utf8-content"}
+    rules = {name for name, pattern in CONTENT_RULES if pattern.search(text)}
+    if any(not safe_placeholder(match["value"]) for match in ASSIGNMENT.finditer(text)):
+        rules.add("credential-assignment")
+    return rules
+
+
+def scan(repo: Path) -> list[tuple[str, str]]:
+    findings: set[tuple[str, str]] = set()
+    # --stage reports blob IDs from the index, even when the working tree differs.
+    entries = git(repo, "ls-files", "--stage", "-z").split(b"\0")
+    for entry in filter(None, entries):
+        try:
+            metadata, raw_path = entry.split(b"\t", 1)
+            mode, oid, stage = metadata.decode("ascii").split()
+            path = raw_path.decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            findings.add(("<index>", "unreadable-index-entry"))
+            continue
+        parts = path.lower().split("/")
+        if any(part in DENIED_DIRECTORIES for part in parts[:-1]):
+            findings.add((path, "denied-directory"))
+        if any(fnmatch.fnmatchcase(parts[-1], pattern) for pattern in DENIED_FILENAMES):
+            findings.add((path, "denied-filename"))
+        if stage != "0":
+            findings.add((path, "unmerged-index-entry"))
+        if mode not in {"100644", "100755"}:
+            findings.add((path, "unsupported-index-mode"))
+            continue
+        try:
+            # Check size before materializing the blob in memory.
+            size = int(git(repo, "cat-file", "-s", oid))
+            if size > MAX_BLOB_BYTES:
+                findings.add((path, "oversized-blob"))
+                continue
+            blob = git(repo, "cat-file", "blob", oid)
+            for rule in content_violations(blob):
+                findings.add((path, rule))
+        except (OSError, RuntimeError, ValueError):
+            findings.add((path, "unreadable-blob"))
+    return sorted(findings)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Git working tree (default: current directory)")
+    args = parser.parse_args()
+    try:
+        findings = scan(args.repo)
+    except (OSError, RuntimeError):
+        print("Sensitive-file check failed: git-index-unavailable", file=sys.stderr)
+        return 2
+    for path, rule in findings:
+        # JSON escaping keeps control characters in paths from reaching the terminal.
+        print(f"{json.dumps(path, ensure_ascii=True)}: {rule}", file=sys.stderr)
+    if findings:
+        print(f"Sensitive-file check failed: {len(findings)} finding(s).", file=sys.stderr)
+        return 1
+    print("Sensitive-file check passed: all Git-index entries checked.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

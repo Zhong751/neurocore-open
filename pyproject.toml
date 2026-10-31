@@ -1,0 +1,20 @@
+[project]
+name = "neurocore"
+version = "0.0.0.dev0"
+description = "Early foundations for a general AI individual kernel"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "NeuroCore contributors" }]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Zhong751/neurocore-open"
+
+[build-system]
+requires = ["uv_build==0.13.6"]
+build-backend = "uv_build"
+
+[tool.uv]
+required-version = "==0.13.6"
