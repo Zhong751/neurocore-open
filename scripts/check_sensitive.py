@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import json
 from pathlib import Path
 import re
 import subprocess
@@ -99,54 +98,63 @@ def content_violations(blob: bytes) -> set[str]:
     return rules
 
 
-def scan(repo: Path) -> list[tuple[str, str]]:
-    findings: set[tuple[str, str]] = set()
+def scan(repo: Path) -> list[tuple[int, str]]:
+    # Findings never retain paths: filenames can contain the secrets we detect.
+    findings: set[tuple[int, str]] = set()
     # --stage reports blob IDs from the index, even when the working tree differs.
     entries = git(repo, "ls-files", "--stage", "-z").split(b"\0")
-    for entry in filter(None, entries):
+    for file_number, entry in enumerate(filter(None, entries), start=1):
         try:
             metadata, raw_path = entry.split(b"\t", 1)
             mode, oid, stage = metadata.decode("ascii").split()
             path = raw_path.decode("utf-8")
         except (ValueError, UnicodeDecodeError):
-            findings.add(("<index>", "unreadable-index-entry"))
+            findings.add((file_number, "unreadable-index-entry"))
             continue
+        # Preserve original case for case-sensitive patterns; rules are unchanged.
+        for rule in content_violations(raw_path):
+            findings.add((file_number, "path-" + rule))
         parts = path.lower().split("/")
         if any(part in DENIED_DIRECTORIES for part in parts[:-1]):
-            findings.add((path, "denied-directory"))
+            findings.add((file_number, "denied-directory"))
         if any(fnmatch.fnmatchcase(parts[-1], pattern) for pattern in DENIED_FILENAMES):
-            findings.add((path, "denied-filename"))
+            findings.add((file_number, "denied-filename"))
         if stage != "0":
-            findings.add((path, "unmerged-index-entry"))
+            findings.add((file_number, "unmerged-index-entry"))
         if mode not in {"100644", "100755"}:
-            findings.add((path, "unsupported-index-mode"))
+            findings.add((file_number, "unsupported-index-mode"))
             continue
         try:
             # Check size before materializing the blob in memory.
             size = int(git(repo, "cat-file", "-s", oid))
             if size > MAX_BLOB_BYTES:
-                findings.add((path, "oversized-blob"))
+                findings.add((file_number, "oversized-blob"))
                 continue
             blob = git(repo, "cat-file", "blob", oid)
             for rule in content_violations(blob):
-                findings.add((path, rule))
+                findings.add((file_number, rule))
         except (OSError, RuntimeError, ValueError):
-            findings.add((path, "unreadable-blob"))
+            findings.add((file_number, "unreadable-blob"))
     return sorted(findings)
 
 
+class SafeArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        # argparse's default error includes untrusted argument values.
+        self.exit(2, "Sensitive-file check failed: invalid-arguments\n")
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, default=Path.cwd(), help="Git working tree (default: current directory)")
+    parser = SafeArgumentParser(prog="check_sensitive.py", description=__doc__)
+    parser.add_argument("--repo", type=Path, default=Path("."), help="Git working tree (default: current directory)")
     args = parser.parse_args()
     try:
         findings = scan(args.repo)
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         print("Sensitive-file check failed: git-index-unavailable", file=sys.stderr)
         return 2
-    for path, rule in findings:
-        # JSON escaping keeps control characters in paths from reaching the terminal.
-        print(f"{json.dumps(path, ensure_ascii=True)}: {rule}", file=sys.stderr)
+    for file_number, rule in findings:
+        print(f"file#{file_number}: {rule}", file=sys.stderr)
     if findings:
         print(f"Sensitive-file check failed: {len(findings)} finding(s).", file=sys.stderr)
         return 1

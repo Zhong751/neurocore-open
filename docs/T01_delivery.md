@@ -1,9 +1,57 @@
 # T-01 delivery record
 
-Status: T-01 implementation and local/Windows CI checks passed; C2 independent
-acceptance pending. Do not merge or start T-02 based on this draft.
+Status: R-01 independent acceptance found F-01 and marked T-01 **NO-GO**.
+The scoped remediation below awaits C2 retest; prior automated CI success did
+not establish safe diagnostics. Do not merge or start T-02 based on this draft.
 
-## Repository and scope
+## T-01-F01: secret-bearing filenames in diagnostics
+
+Reviewed baseline: `45bcc2077ba7956670518a394df5508ffe0c63d5`. The baseline printed
+`json.dumps(path)` for every finding. JSON escapes control characters but leaves
+credential text intact; one filename triggered three findings and leaked the
+same dynamic synthetic value three times. The content rules were also applied
+only to blobs, so a credential-shaped filename with a harmless body passed.
+
+The fix retains only integer index-entry numbers and fixed categories in
+findings. It applies the unchanged content rules to original-case path bytes,
+and replaces argparse's value-bearing diagnostics with a fixed category and
+program label. It does not redact by quoting or masking only the body. Test
+assertions and fixture failures no longer include raw outputs, paths or values.
+
+Only five existing files change: `scripts/check_sensitive.py`,
+`tests/test_sensitive.py`, `README.md`, `docs/security_checks.md` and this report.
+The package, dependency lock, CI permissions/workflow, `.gitignore` and license
+are unchanged. AST comparison against the reviewed commit confirmed the original
+rule constants, placeholder logic, blob checker and Git helper are unchanged.
+The Git-index scan scope and exit codes remain unchanged.
+
+| Counterexample | Before | After / regression coverage |
+| --- | --- | --- |
+| F01-A: same dynamic token in filename and body | Exit 1; stdout 0, stderr 3 complete token occurrences | Exit 1; stdout 0, stderr 0; file number plus four fixed findings, including path detection |
+| F01-B: token only in filename | Exit 0, not detected | Exit 1, no token echo; GitHub-shaped and case-sensitive AWS/Google-shaped dynamic cases |
+| F01-C: ordinary filename and content | Passed | Existing clean-source/docs/lock test still passes; all original 23 test cases retained |
+| F01-D: index/blob/CLI error | Path/argument diagnostics could carry values | Missing blob under a sensitive filename, injected index exception and unknown CLI argument all fail without value echo |
+| F01-E: failing test output | Assertions could render secret operands or raw stderr | Six inner failures covering status/category/redaction assertions and Git/file setup errors captured in memory; reports contain no fixture value |
+
+Local Windows, Python 3.12.16 / uv 0.13.6: `uv sync --locked`, `uv lock --check`,
+the full `unittest discover` run (**29 passed, zero skipped, 15.441s**) and
+`uv build` passed. The 29 tests are the original 23 plus six new F-01 test methods;
+F01-C reuses the retained normal-file coverage. Before/after probes published
+only exit codes and occurrence counts; raw token-bearing output was never saved.
+Disposable repositories are removed after tests.
+
+The new commit must run the existing Windows workflow; the exact remediation SHA
+and actual run link are recorded in the existing [Draft PR #1](https://github.com/Zhong751/neurocore-open/pull/1)
+delivery description. The old 23-test CI links below are historical evidence,
+not acceptance evidence for F-01. C2 must retest F-01 and determine whether prior
+acceptance results still apply.
+
+The scanner remains lexical and index-only: novel/encoded credential forms and
+ordinary personal text may escape detection. This change prevents diagnostics
+from exposing raw paths regardless of whether a path matches a known pattern;
+it does not claim broader privacy detection or full-history scanning.
+
+## Original T-01 repository and scope
 
 - Public repository: <https://github.com/Zhong751/neurocore-open>
 - Draft PR: <https://github.com/Zhong751/neurocore-open/pull/1>
@@ -39,7 +87,7 @@ all staged files before pushing; only text source/config/docs and the dependency
 lock may be published. Synthetic scanner fixtures live in temporary independent
 Git repositories and are not committed as complete credential-shaped strings.
 
-## Results
+## Original T-01 execution results (superseded acceptance conclusion)
 
 Local Windows, uv 0.13.6, CPython 3.12.16:
 
@@ -138,8 +186,9 @@ uv.lock
   wheel's bundled license after installation. Both initial failures are retained
   here; the final 23-test run and wheel check passed.
 
-There are no remaining failed/skipped required T-01 checks. Earlier environment
-and test-development failures above remain disclosed. Installing directly from
+Those original automated checks had no failures/skips, but R-01 subsequently
+identified F-01; they did not cover secret-bearing filename diagnostics.
+Earlier environment and test-development failures above remain disclosed. Installing directly from
 the sdist was not separately tested; the wheel was built from that sdist and
 installed. No public package release was created. Branch-protection rules and a
 third-party full-history secret scanning service were not configured by this task.

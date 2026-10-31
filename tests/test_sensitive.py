@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import os
+from contextlib import redirect_stderr, redirect_stdout
+import importlib.util
+import io
 from pathlib import Path
+import re
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 SCANNER = Path(__file__).resolve().parents[1] / "scripts" / "check_sensitive.py"
@@ -18,7 +24,7 @@ SCANNER = Path(__file__).resolve().parents[1] / "scripts" / "check_sensitive.py"
 class SensitiveIndexTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="neurocore-sensitive-")
-        self.addCleanup(self.temporary.cleanup)
+        self.addCleanup(self.cleanup_temporary)
         self.repo = Path(self.temporary.name)
         # Scope ownership permission to this disposable repository; never alter global config.
         self.environment = os.environ.copy()
@@ -29,16 +35,30 @@ class SensitiveIndexTests(unittest.TestCase):
         self.git("init", "--quiet")
 
     def git(self, *args: str, data: bytes | None = None) -> bytes:
-        result = subprocess.run(
-            ["git", "-C", str(self.repo), *args], input=data, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=self.environment, check=True,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self.repo), *args], input=data, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=self.environment, check=False,
+            )
+        except (OSError, ValueError):
+            raise AssertionError("Synthetic Git fixture operation failed") from None
+        if result.returncode:
+            raise AssertionError("Synthetic Git fixture operation failed")
         return result.stdout
 
+    def cleanup_temporary(self) -> None:
+        try:
+            self.temporary.cleanup()
+        except OSError:
+            raise AssertionError("Synthetic fixture cleanup failed") from None
+
     def stage(self, name: str, content: str | bytes) -> None:
-        path = self.repo / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content.encode("utf-8") if isinstance(content, str) else content)
+        try:
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content.encode("utf-8") if isinstance(content, str) else content)
+        except (OSError, ValueError):
+            raise AssertionError("Synthetic file fixture creation failed") from None
         self.git("add", "--force", "--", name)
 
     def check(self) -> subprocess.CompletedProcess[str]:
@@ -49,9 +69,18 @@ class SensitiveIndexTests(unittest.TestCase):
         )
 
     def assert_rejected(self, result: subprocess.CompletedProcess[str], rule: str) -> None:
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn(rule, result.stderr)
-        self.assertNotIn("passed", result.stdout)
+        self.assertEqual(result.returncode, 1, "Expected a finding exit code")
+        self.assertTrue(rule in result.stderr, "Expected diagnostic category missing")
+        self.assertTrue("passed" not in result.stdout, "Rejected input reported success")
+
+    def assert_redacted(self, result: subprocess.CompletedProcess[str], *values: str) -> None:
+        self.assertTrue(
+            all(value not in result.stdout and value not in result.stderr for value in values),
+            "Diagnostic output exposed a sensitive fixture",
+        )
+
+    def synthetic_token(self) -> str:
+        return "gh" + "p_" + "SYNTHETIC" + secrets.token_hex(18)
 
     def test_clean_source_docs_and_lock_hashes_pass(self) -> None:
         self.stage("src/neurocore/example.py", 'print("hello")\n')
@@ -59,8 +88,8 @@ class SensitiveIndexTests(unittest.TestCase):
         self.stage("docs/guide.md", "# Public guide\n中文文档。\n")
         self.stage("uv.lock", 'version = 1\nhash = "sha256:' + "a0" * 32 + '"\n')
         result = self.check()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("all Git-index entries checked", result.stdout)
+        self.assertEqual(result.returncode, 0, "Clean source rejected")
+        self.assertTrue("all Git-index entries checked" in result.stdout, "Success category missing")
 
     def test_empty_index_is_clean(self) -> None:
         self.assertEqual(self.check().returncode, 0)
@@ -81,7 +110,7 @@ class SensitiveIndexTests(unittest.TestCase):
         for rule, value in examples:
             with self.subTest(rule=rule):
                 self.assert_rejected(result, rule)
-                self.assertNotIn(value, result.stdout + result.stderr)
+                self.assert_redacted(result, value)
 
     def test_private_key_headers_are_detected(self) -> None:
         for index, kind in enumerate(("", "RSA ", "EC ", "OPENSSH ", "ENCRYPTED ")):
@@ -90,7 +119,7 @@ class SensitiveIndexTests(unittest.TestCase):
         result = self.check()
         self.assert_rejected(result, "private-key")
         self.assertEqual(result.stderr.count(": private-key"), 5)
-        self.assertNotIn("-----BEGIN", result.stderr)
+        self.assert_redacted(result, "-----BEGIN")
 
     def test_generic_assignments_are_detected(self) -> None:
         examples = (
@@ -106,7 +135,7 @@ class SensitiveIndexTests(unittest.TestCase):
         result = self.check()
         self.assert_rejected(result, "credential-assignment")
         self.assertEqual(result.stderr.count(": credential-assignment"), len(examples))
-        self.assertNotIn(value, result.stdout + result.stderr)
+        self.assert_redacted(result, value)
 
     def test_placeholders_and_runtime_environment_references_pass(self) -> None:
         name = "API" + "_KEY"
@@ -117,7 +146,7 @@ class SensitiveIndexTests(unittest.TestCase):
         )
         self.stage("examples.txt", "\n".join(name + " = " + value for value in values))
         result = self.check()
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.returncode, 0, "Safe placeholders rejected")
 
     def test_force_tracked_env_is_rejected(self) -> None:
         self.stage(".gitignore", ".env\n")
@@ -137,10 +166,10 @@ class SensitiveIndexTests(unittest.TestCase):
         for name in names:
             self.stage(name, "synthetic content\n")
         result = self.check()
-        self.assertEqual(result.returncode, 1, result.stderr)
-        for name in names:
-            with self.subTest(path=name):
-                self.assertIn(name, result.stderr)
+        self.assertEqual(result.returncode, 1, "Denied paths accepted")
+        identifiers = {int(number) for number in re.findall(r"^file#(\d+):", result.stderr, re.M)}
+        self.assertTrue(identifiers == set(range(1, len(names) + 1)), "Not all denied index entries reported")
+        self.assert_redacted(result, *names)
 
     def test_staged_secret_survives_working_tree_cleanup(self) -> None:
         value = "gh" + "p_" + "b" * 36
@@ -167,7 +196,7 @@ class SensitiveIndexTests(unittest.TestCase):
         self.stage("control.txt", b"safe\x1bdata")
         result = self.check()
         self.assert_rejected(result, "binary-content")
-        self.assertIn("non-utf8-content", result.stderr)
+        self.assertTrue("non-utf8-content" in result.stderr, "Non-UTF8 category missing")
 
     def test_oversized_blob_is_rejected(self) -> None:
         self.stage("large.txt", b"a" * (4 * 1024 * 1024 + 1))
@@ -204,8 +233,97 @@ class SensitiveIndexTests(unittest.TestCase):
                 text=True, encoding="utf-8", env=self.environment, check=False,
             )
         self.assertEqual(result.returncode, 2)
-        self.assertIn("git-index-unavailable", result.stderr)
-        self.assertNotIn("passed", result.stdout)
+        self.assertTrue("git-index-unavailable" in result.stderr, "Index error category missing")
+        self.assertTrue("passed" not in result.stdout, "Index error reported success")
+
+    def test_f01_a_same_dynamic_secret_in_filename_and_body(self) -> None:
+        value = self.synthetic_token()
+        name = "secrets/" + value + ".env"
+        self.stage(name, value)
+        result = self.check()
+        for rule in ("denied-directory", "denied-filename", "github-token", "path-github-token"):
+            self.assert_rejected(result, rule)
+        self.assert_redacted(result, value, name)
+        self.assertEqual(result.stderr.count("file#1:"), 4)
+
+    def test_f01_b_only_path_has_sensitive_pattern(self) -> None:
+        # Case-sensitive formats ensure path matching does not lowercase secrets.
+        examples = (
+            ("github-token", self.synthetic_token()),
+            ("aws-access-key", "AK" + "IA" + secrets.token_hex(8).upper()),
+            ("google-api-key", "AI" + "za" + secrets.token_hex(18)[:35]),
+        )
+        for rule, value in examples:
+            self.stage(value + ".txt", "harmless content\n")
+        result = self.check()
+        for rule, value in examples:
+            with self.subTest(rule=rule):
+                self.assert_rejected(result, "path-" + rule)
+                self.assert_redacted(result, value, value + ".txt")
+
+    def test_f01_d_unreadable_blob_with_sensitive_path(self) -> None:
+        value = self.synthetic_token()
+        self.git("update-index", "--add", "--cacheinfo", f"100644,{'1' * 40},{value}.txt")
+        result = self.check()
+        self.assert_rejected(result, "unreadable-blob")
+        self.assert_redacted(result, value)
+
+    def test_f01_d_index_exception_does_not_render_message(self) -> None:
+        value = self.synthetic_token()
+        spec = importlib.util.spec_from_file_location("scanner_f01", SCANNER)
+        scanner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scanner)
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["check_sensitive.py"]), \
+             mock.patch.object(scanner, "git", side_effect=OSError(value)), \
+             redirect_stdout(output), redirect_stderr(errors):
+            code = scanner.main()
+        result = subprocess.CompletedProcess([], code, output.getvalue(), errors.getvalue())
+        self.assertEqual(code, 2)
+        self.assertTrue("git-index-unavailable" in result.stderr, "Index error category missing")
+        self.assert_redacted(result, value)
+
+    def test_f01_d_cli_error_does_not_echo_argument(self) -> None:
+        value = self.synthetic_token()
+        result = subprocess.run(
+            [sys.executable, str(SCANNER), "--unknown", value], capture_output=True,
+            text=True, encoding="utf-8", env=self.environment, check=False,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertTrue("invalid-arguments" in result.stderr, "CLI error category missing")
+        self.assert_redacted(result, value)
+
+    def test_f01_e_failing_test_reports_do_not_echo_fixtures(self) -> None:
+        value = self.synthetic_token()
+        leaking = subprocess.CompletedProcess([], 1, value, value)
+        wrong_status = subprocess.CompletedProcess([], 0, value, value)
+
+        def git_failure():
+            failure = subprocess.CompletedProcess(["git", value], 1, value, value)
+            with mock.patch("subprocess.run", return_value=failure):
+                self.git("add", value)
+
+        def git_exception():
+            with mock.patch("subprocess.run", side_effect=OSError(value)):
+                self.git("add", value)
+
+        def file_exception():
+            with mock.patch.object(Path, "write_bytes", side_effect=OSError(value)):
+                self.stage(value + ".txt", "harmless")
+
+        callbacks = (
+            lambda: self.assert_rejected(wrong_status, "github-token"),
+            lambda: self.assert_rejected(leaking, "github-token"),
+            lambda: self.assert_redacted(leaking, value),
+            git_failure, git_exception, file_exception,
+        )
+        for index, callback in enumerate(callbacks):
+            with self.subTest(case=index):
+                report = io.StringIO()
+                suite = unittest.TestSuite([unittest.FunctionTestCase(callback)])
+                result = unittest.TextTestRunner(stream=report).run(suite)
+                self.assertEqual(len(result.failures), 1, "Expected an intentional assertion failure")
+                self.assertTrue(value not in report.getvalue(), "Test failure report exposed a sensitive fixture")
 
 
 if __name__ == "__main__":

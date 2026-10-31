@@ -4,8 +4,12 @@ Run `python scripts/check_sensitive.py` from the repository root. The command is
 read-only and requires Python 3.12+ and Git. It has no Python package dependencies.
 Use `--repo PATH` to check a different Git working tree. Exit codes are `0` for a
 clean index, `1` for findings, and `2` when the Git index cannot be inspected.
-Diagnostics include only the escaped path and rule name; matching values and Git
-error output are never printed.
+Diagnostics include only an index-entry number (for example `file#1`) and fixed
+rule names. Raw paths, filenames, matching values, blob content and Git error
+output are never printed. JSON escaping is not redaction: a filename itself can
+contain a secret. Findings therefore do not retain original paths at all.
+Invalid CLI arguments also receive a fixed error category instead of argparse's
+default argument echo. The CLI program label is fixed, not derived from its path.
 
 The input is **every entry in the current Git index**, not just changed files and
 not the working-tree version. Stage intended changes before running the gate.
@@ -20,6 +24,10 @@ again after any change to staged content.
   and chat exports. Denied filenames cover `.env` variants (including templates),
   credential files, database files and sidecars, logs, backups, and common chat
   export names. Path matching is case-insensitive and applies at any depth.
+- Original-case index paths also pass through the existing content rules below;
+  path findings use `path-` plus the rule name. A token-bearing filename with a
+  harmless body is rejected. No new credential pattern or placeholder exception
+  was introduced for this path check.
 - Media, SVG, model, archive, and binary document filenames are denied. No character
   assets or other binary files are approved in this initial repository. Ordinary
   source code, Markdown documentation, configuration, and lockfiles are allowed.
@@ -57,6 +65,11 @@ It does not contact any provider or test whether a credential works. Run it in a
 stable checkout; history review is separate work. Git's own repository ownership
 checks remain in effect.
 
+File numbers are the one-based order of nonempty records returned by
+`git ls-files --stage -z` for that scan; they are not persistent identifiers. For
+local investigation, inspect the same index privately and do not copy its path
+listing into CI logs. The checker intentionally provides no path-output mode.
+
 An intentional public example should use an explicit placeholder or runtime
 environment lookup. Before allowing a new file class, review why it belongs in
 the public repository, then update the scanner, `.gitignore`, tests, and this
@@ -72,3 +85,9 @@ python -m unittest discover -s tests -p "test_gitignore.py" -v
 The tests create independent temporary Git repositories. Credential-shaped test
 values are assembled at runtime from synthetic fragments; no working credentials
 or complete credential-shaped fixtures are stored in the repository.
+F-01 additionally uses dynamic fixture values in filenames and bodies. Test
+assertions compare booleans with fixed messages, not raw outputs or secret
+operands; fixture setup errors are similarly sanitized. Six intentionally failing
+inner test cases are captured in memory to check failure-report redaction. They
+are expected failures inside a passing regression test, not skipped tests or
+failed CI results. No token-bearing raw failure log is written or uploaded.

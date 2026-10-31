@@ -23,7 +23,7 @@ uv build
 ```
 
 The scanner reads Git-index blobs, so stage intended changes before the final
-pre-push scan. It reports rule names and paths without echoing matched values.
+pre-push scan. It reports index-entry numbers and rule names, never raw paths.
 Its scope and limitations are in [security checks](docs/security_checks.md).
 
 ## Layout
