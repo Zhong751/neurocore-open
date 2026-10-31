@@ -1,7 +1,8 @@
 # T-03: character packages, instances and read-only doctor
 
-Status: implemented for Draft PR / C2 independent review; not authorization to
-merge, publish a release or begin T-04. Base is public `main`, fetched and checked
+Status: [Draft PR #3](https://github.com/Zhong751/neurocore-open/pull/3), awaiting
+C2 independent review; not authorization to merge, publish a release or begin
+T-04. Base is public `main`, fetched and checked
 before development: `7a544c59dfa966031ed64881ef8d2850cdafcb88`.
 Branch: `codex/t03-character-instances`. No private or unmerged PR is a parent.
 
@@ -61,7 +62,13 @@ directories, a journal path that is a directory and malformed Unicode paths.
 | sdist and wheel build | Passed |
 | Fresh wheel environment, Python `-I` | Imports/license/M1 lifecycle, installed CLI creation and read-only doctor passed outside checkout |
 | Staged Git-index sensitive scan | Passed; all tracked/index blobs checked, with public diff review |
-| Public Windows CI | Pending Draft PR run; local success is not runner success |
+| Public Windows CI | [Run 41215732473](https://github.com/Zhong751/neurocore-open/actions/runs/41215732473): success; 86 passed, zero skipped, 34.299 seconds on Windows Server 2025 / Python 3.12.10; all step logs inspected |
+
+The public run checks implementation commit
+`e803d5ddd300dfa5eeb251d22d5f73cdc385ba67` via GitHub's PR merge ref. Its locked
+environment, imports, sensitive scan, build and independent wheel lifecycle all
+passed. The final delivery-only commit records this evidence; the PR checks tab
+and PR description identify the latest head and its corresponding rerun.
 
 Reproduce with the README development commands. The workflow runs all tests,
 locked sync/check, installed imports, Git-index scan, sdist/wheel build and
