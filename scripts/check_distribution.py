@@ -2,12 +2,16 @@
 import hashlib
 import importlib
 import importlib.metadata
+import json
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 
 
 def main():
-    for name in ("neurocore", "neurocore.core", "neurocore.perception", "neurocore.models", "neurocore.api", "neurocore.memory"):
+    for name in ("neurocore", "neurocore.core", "neurocore.perception", "neurocore.models", "neurocore.api", "neurocore.memory",
+                 "neurocore.characters", "neurocore.instances", "neurocore.doctor", "neurocore.cli"):
         importlib.import_module(name)
     distribution = importlib.metadata.distribution("neurocore")
     if distribution.metadata["License-Expression"] != "Apache-2.0":
@@ -35,7 +39,28 @@ def main():
         store.withdraw_event("event-1", reason="Synthetic withdrawal")
         assert not reader.list_valid_facts()["facts"]
         assert not reader.validate_references([confirmed["ref"]])["valid"]
-    print("Built wheel imports, license and independent M1 lifecycle: passed")
+    from neurocore.instances import load_instance
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        character = root / "synthetic character"
+        character.mkdir()
+        (character / "character.json").write_text(json.dumps({
+            "format_version": 1, "name": "Synthetic Wheel", "seed": "seed.md"}), encoding="utf-8")
+        (character / "seed.md").write_text("# Synthetic seed\nNo historical events.\n", encoding="utf-8")
+        command = [str(Path(sys.executable).with_name("neurocore.exe" if sys.platform == "win32" else "neurocore"))]
+        created = subprocess.run([*command, "new", "--character", str(character)],
+                                 cwd=root, capture_output=True, text=True, check=True, timeout=20)
+        receipt = json.loads(created.stdout)
+        instance = load_instance(receipt["instance_directory"])
+        assert instance.instance_id == receipt["instance_id"]
+        before = {p.relative_to(instance.root): (p.read_bytes(), p.stat().st_mtime_ns)
+                  for p in instance.root.rglob("*") if p.is_file()}
+        checked = subprocess.run([sys.executable, "-I", "-m", "neurocore", "doctor"],
+                                 cwd=instance.root, capture_output=True, text=True, check=True, timeout=20)
+        assert "PASS identity" in checked.stdout
+        assert before == {p.relative_to(instance.root): (p.read_bytes(), p.stat().st_mtime_ns)
+                          for p in instance.root.rglob("*") if p.is_file()}
+    print("Built wheel imports, license, M1 lifecycle and T-03 CLI/identity/read-only doctor: passed")
 
 
 if __name__ == "__main__":
