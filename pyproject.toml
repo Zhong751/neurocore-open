@@ -9,6 +9,9 @@ license-files = ["LICENSE"]
 authors = [{ name = "NeuroCore contributors" }]
 dependencies = []
 
+[project.scripts]
+neurocore = "neurocore.cli:main"
+
 [project.urls]
 Repository = "https://github.com/Zhong751/neurocore-open"
 
