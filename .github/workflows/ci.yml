@@ -1,0 +1,58 @@
+name: Windows foundation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  foundation:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout reviewed revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.6"
+          python-version: "3.12"
+          enable-cache: false
+          save-cache: false
+
+      - name: Install locked environment
+        run: |
+          uv sync --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          uv lock --check
+
+      - name: Import installed package
+        run: uv run --no-sync python -I -c "import neurocore; import neurocore.core, neurocore.perception, neurocore.models, neurocore.api"
+
+      - name: Run foundation and synthetic safety tests
+        run: uv run --no-sync python -m unittest discover -s tests -v
+
+      - name: Scan every tracked Git blob
+        run: uv run --no-sync python scripts/check_sensitive.py
+
+      - name: Build distributions
+        run: uv build
+
+      - name: Verify built wheel outside source imports
+        run: |
+          uv venv .wheel-venv --python 3.12
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $wheel = (Get-ChildItem -LiteralPath dist -Filter '*.whl').FullName
+          uv pip install --python .wheel-venv/Scripts/python.exe --no-deps $wheel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./.wheel-venv/Scripts/python.exe -I scripts/check_distribution.py

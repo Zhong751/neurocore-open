@@ -1,0 +1,108 @@
+# Sensitive-file gate
+
+Run `python scripts/check_sensitive.py` from the repository root. The command is
+read-only and requires Python 3.12+ and Git. It has no Python package dependencies.
+Use `--repo PATH` to check a different Git working tree. Exit codes are `0` for a
+clean index, `1` for findings, and `2` when the Git index cannot be inspected.
+Diagnostics include only an index-entry number (for example `file#1`) and fixed
+rule names. Raw paths, filenames, matching values, blob content and Git error
+output are never printed. JSON escaping is not redaction: a filename itself can
+contain a secret. Findings therefore do not retain original paths at all.
+Invalid CLI arguments also receive a fixed error category instead of argparse's
+default argument echo. The CLI program label is fixed, not derived from its path.
+
+The input is **every entry in the current Git index**, not just changed files and
+not the working-tree version. Stage intended changes before running the gate.
+An unstaged cleanup does not hide a secret still staged for a commit. `.gitignore`
+is a convenience; force-added files still pass through this gate. Run the gate
+again after any change to staged content.
+
+## Rules
+
+- Denied directories cover credential stores, local user instances and data,
+  databases, logs, caches, virtual environments, builds, backups, generated output,
+  and chat exports. Denied filenames cover `.env` variants (including templates),
+  credential files, database files and sidecars, logs, backups, and common chat
+  export names. Path matching is case-insensitive and applies at any depth.
+- Original-case index paths use separate `PATH_RULES`: each existing credential
+  pattern keeps its core and regex flags, but its explicit outer `\b` boundaries
+  are removed. A complete pattern is therefore found next to ASCII letters,
+  underscores or Chinese characters, on either side, anywhere in an index path.
+  Body patterns are unchanged. The path check also retains the original content
+  results, including assignment rules and invalid-data failures. Path findings
+  use `path-` plus the rule name; no new placeholder exception is introduced.
+- Media, SVG, model, archive, and binary document filenames are denied. No character
+  assets or other binary files are approved in this initial repository. Ordinary
+  source code, Markdown documentation, configuration, and lockfiles are allowed.
+- Content patterns detect private-key headers, AWS access-key IDs, common GitHub,
+  Slack, Google, service/Stripe key formats, JWT-shaped strings, and passwords in
+  URLs. A separate rule detects assignments to common credential names, including
+  prefixed names such as provider API keys, in common code/configuration syntax.
+- Empty strings and a small explicit set of documentation placeholders are
+  allowed, as are uppercase angle-bracket placeholders and recognized environment
+  references. The exact patterns and allowlist live in
+  `scripts/check_sensitive.py`. Known key-format rules still apply to placeholders.
+- Non-UTF-8 blobs, NUL/control-containing blobs, files over 4 MiB, unreadable blobs,
+  symlinks, submodules, and unmerged index entries fail closed. Executable UTF-8
+  scripts are allowed. A Git error cannot be reported as a clean result.
+
+Temporary directories, local verification output, wheel test environments, and
+local/generated asset directories are excluded as well. The Python source path
+`src/neurocore/models/` remains allowed; model artifact extensions are denied.
+
+The scanner deliberately does not classify arbitrary high-entropy text as a
+secret. Normal package integrity hashes in `uv.lock` remain valid inputs.
+
+## Limits and maintenance
+
+This is a small deterministic review gate, not proof that a repository has no
+private information. Novel credential formats, obfuscated/encoded values,
+multiline or computed assignments, and ordinary personal text may evade these
+patterns. The assignment rule is lexical, not a language parser: unusual variable
+expressions or type annotations can require review. A UTF-8 text asset with no
+denied name or matching content can pass. Do not approve it solely on that basis.
+
+Path matching deliberately rejects any name containing a complete known
+credential-shaped substring, including a substring of a longer identifier. A
+legitimate identifier with that shape may consequently be rejected. Normal names
+and incomplete prefixes in the regression corpus still pass; that is not a claim
+of zero false positives. Matching is case-sensitive where the original rule is
+case-sensitive; this does not normalize or decode credentials. Prose retains its
+original Unicode word-boundary behavior, including its existing limitations.
+
+The command checks the current index only: it does not scan history, remote refs,
+untracked files, ignored files, or files staged concurrently after enumeration.
+It does not contact any provider or test whether a credential works. Run it in a
+stable checkout; history review is separate work. Git's own repository ownership
+checks remain in effect.
+
+File numbers are the one-based order of nonempty records returned by
+`git ls-files --stage -z` for that scan; they are not persistent identifiers. For
+local investigation, inspect the same index privately and do not copy its path
+listing into CI logs. The checker intentionally provides no path-output mode.
+
+An intentional public example should use an explicit placeholder or runtime
+environment lookup. Before allowing a new file class, review why it belongs in
+the public repository, then update the scanner, `.gitignore`, tests, and this
+document together. Do not bypass the gate with `git add -f`.
+
+Run the focused checks with:
+
+```console
+python -m unittest discover -s tests -p "test_sensitive.py" -v
+python -m unittest discover -s tests -p "test_gitignore.py" -v
+```
+
+The tests create independent temporary Git repositories. Credential-shaped test
+values are assembled at runtime from synthetic fragments; no working credentials
+or complete credential-shaped fixtures are stored in the repository.
+F-01 additionally uses dynamic fixture values in filenames and bodies. Test
+assertions compare booleans with fixed messages, not raw outputs or secret
+operands; fixture setup errors are similarly sanitized. Six intentionally failing
+inner test cases are captured in memory to check failure-report redaction. They
+are expected failures inside a passing regression test, not skipped tests or
+failed CI results. No token-bearing raw failure log is written or uploaded.
+F-02 tests confirm every expected path is present in the index and each indexed
+body is harmless before testing the filename matrix. They cover prefix/suffix
+combinations, case rules, clean names, body-only and combined findings, unchanged
+body semantics and safe assertion failures, using dynamic synthetic values.
