@@ -14,7 +14,7 @@ class PackageTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, "-I", "-c",
                  "import neurocore; import neurocore.core, neurocore.perception, "
-                 "neurocore.models, neurocore.api; print('import-ok')"],
+                 "neurocore.models, neurocore.api, neurocore.memory; print('import-ok')"],
                 cwd=directory, capture_output=True, text=True, check=True,
             )
         self.assertEqual(result.stdout.strip(), "import-ok")
