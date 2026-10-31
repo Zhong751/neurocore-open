@@ -16,6 +16,15 @@ class MemoryStore(MemoryReader):
         create(directory, brain_id)
         return cls(directory, brain_id=brain_id)
 
+    @staticmethod
+    def _suppression_key(candidate):
+        # Preserve M1's fact/scope/origin identity: span or parent-list edits
+        # cannot erase an explicit rejection of the same sourced assertion.
+        identity = {k: candidate[k] for k in ("conversation_id", "subject_id", "predicate",
+                                             "value", "valid_time_text", "conditions")}
+        identity["origins"] = sorted({e["ref"]["digest"] for e in candidate["evidence"]})
+        return digest(identity)
+
     def append_event(self, *, event_id, source_id, source_type, speaker_id, role,
                      provenance, conversation_id, content, occurred_at, metadata=None):
         for value in (event_id, source_id, source_type, speaker_id, conversation_id):
@@ -95,7 +104,7 @@ class MemoryStore(MemoryReader):
             if not self._matches(parent, "fact", row):
                 raise MemoryError("Invalid parent reference")
             self._usable(con, row["fact_id"], row["revision"])
-        if con.execute("SELECT 1 FROM suppressions WHERE digest=?", (digest(candidate),)).fetchone():
+        if con.execute("SELECT 1 FROM suppressions WHERE digest=?", (self._suppression_key(candidate),)).fetchone():
             raise MemoryError("Rejected or withdrawn candidate cannot be reproposed")
         return candidate
 
@@ -185,7 +194,7 @@ class MemoryStore(MemoryReader):
             if action == "accept":
                 self._conflicts(con, fact_id, revision, candidate)
             else:
-                con.execute("INSERT OR IGNORE INTO suppressions VALUES(?)", (digest(candidate),))
+                con.execute("INSERT OR IGNORE INTO suppressions VALUES(?)", (self._suppression_key(candidate),))
             self._storage.advance(con, action, fact_id, reason)
             return self._storage.receipt(con, fact=self._view(con, self._fact(con, fact_id)))
 

@@ -136,6 +136,16 @@ print('restart-ok')
         self.store.withdraw_event("source", reason="Synthetic withdrawal")
         self.assertEqual(self.event()["status"], "withdrawn")
 
+    def test_rejected_assertion_cannot_evade_suppression_by_changing_span(self):
+        self.event()
+        fields = self.candidate()
+        fact = self.store.propose_fact(**fields)["fact"]
+        self.store.review_fact(fact["fact_id"], expected_revision=1, action="reject", reason="Synthetic rejection")
+        fields["evidence"] = [self.store.cite("source", 10, 22)]
+        reopened = MemoryStore(self.root, brain_id="synthetic-boundary")
+        with self.assertRaisesRegex(MemoryError, "cannot be reproposed"):
+            reopened.propose_fact(**fields)
+
     def test_read_only_snapshot_has_no_writes_even_with_a_legal_external_writer(self):
         self.event()
         fact = self.confirmed(**self.candidate())

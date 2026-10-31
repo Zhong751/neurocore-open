@@ -1,6 +1,6 @@
 # T-02: trusted memory core delivery
 
-Status: implemented and locally self-tested; Draft PR awaits C2 independent
+Status: implemented and self-tested; [Draft PR #2](https://github.com/Zhong751/neurocore-open/pull/2) awaits C2 independent
 review. Do not merge or start T-03. Public base:
 `fb06c6dd320c8e386264e0b390a6beceb5936137`; branch `codex/t02-m1-core`.
 No private commits are parents of this branch.
@@ -40,9 +40,9 @@ Local Windows, Python 3.12.16, uv 0.13.6:
 | Source/runtime import and synthetic example | Passed without model/key |
 | sdist then wheel build | Passed, unchanged uv backend and lock |
 | Separate wheel environment, Python `-I` | Imports, license and actual M1 confirm/withdraw lifecycle passed |
-| Public Windows Actions | Pending actual runner; final SHA/run result must be verified in the Draft PR before delivery is called complete |
+| Public Windows Actions, initial implementation | [Run 41206230857](https://github.com/Zhong751/neurocore-open/actions/runs/41206230857), success; actual log inspected |
 
-The 23 new M1 tests cover the following. Counts are not a claim of full formal
+The initial 23 new M1 tests cover the following. Counts are not a claim of full formal
 verification, and the old 36 T-01 tests remain intact.
 
 | Task scenario / counterexample | Evidence |
@@ -123,6 +123,13 @@ is main, not any private or unmerged PR.
   `safe.directory` for this exact public checkout resolved it; no global Git
   trust setting changed. The first uv invocation hit the inaccessible default
   cache; using the pre-existing task-local cache succeeded offline.
+- The GitHub connector could read but returned 403 for PR creation. Chrome was
+  unavailable to the browser controller; the available authenticated browser
+  created the requested Draft PR with main as base. No credentials were extracted.
+- Final source-policy comparison found the first implementation suppressed only
+  an exact full candidate. A follow-up preserves M1's fact/scope/source signature:
+  editing the quote span or parent list does not erase a prior rejection. The
+  added counterexample and final runner evidence are described below.
 - Private M1 tests are used as policy references, not run in a private instance.
   This is a small independent public schema, not binary compatibility or data
   migration. No existing Zealor data is opened or changed.
@@ -140,3 +147,17 @@ is main, not any private or unmerged PR.
   actual Windows checks is claimed. No skipped key scenarios or mock CI result.
 
 Stop after Draft PR delivery; acceptance belongs to C2.
+
+## Actual Windows evidence and final scoped policy check
+
+Initial implementation SHA: `a650251f4adcc365c11b25399125673e260409a5`.
+GitHub run `41206230857`, job `124551741667`, used Microsoft Windows Server 2025
+and CPython 3.12.10. Its PR merge ref combined only that head with the declared
+public main; this was a test ref, not a merge into main. All 59 tests passed in
+28.555 seconds, zero skipped. Locked sync, isolated imports, entire-index scan,
+sdist/wheel and separate installed-wheel M1 lifecycle all succeeded.
+
+The follow-up adds one source-signature suppression counterexample (24 M1 tests,
+60 total), with no schema/dependency changes. The final head and its separate
+Windows run are recorded in Draft PR #2 after checking the real job log; the
+initial run above must not be treated as evidence for a later code change.

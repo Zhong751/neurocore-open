@@ -64,8 +64,9 @@ Accepted model inferences remain pending and unusable as facts/parents, while
 Historical superseded revisions have `status=corrected`; invalidated or retracted
 revisions have `status=withdrawn`. Exact predicate conflicts retain review state
 but set `conflicted=1`, are not usable and invalidate descendants. This is not
-semantic contradiction detection. Rejected/withdrawn exact candidates cannot be
-silently reproposed. Original source text is not changed by fact correction.
+semantic contradiction detection. Rejected/withdrawn assertions with the same
+fact/scope/source signature cannot be reproposed by changing quoted spans or
+parent lists. Original source text is not changed by fact correction.
 
 Event IDs are idempotent when **all fields, including timestamp, match**; retries
 must preserve that timestamp. A changed payload under the same ID raises

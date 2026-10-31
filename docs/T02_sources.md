@@ -61,7 +61,8 @@ licenses and pins remain in [dependencies.md](dependencies.md).
   Any necessary source, parent version or conflict invalidates descendants.
 - Corrections retain original records and create a new pending revision; they
   never auto-confirm replacement text. Exact predicate conflicts remain excluded
-  until explicit human resolution. Rejected/withdrawn proposals are suppressed.
+  until explicit human resolution. Rejected/withdrawn proposals are suppressed
+  by fact/scope/source identity, independent of quoted-span and parent-list edits.
 
 Not migrated: file imports and archive format, FTS/tokenizer, model extraction,
 learning episodes, backup restore, source-scope import controls, C2 publication
