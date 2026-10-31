@@ -24,10 +24,13 @@ again after any change to staged content.
   and chat exports. Denied filenames cover `.env` variants (including templates),
   credential files, database files and sidecars, logs, backups, and common chat
   export names. Path matching is case-insensitive and applies at any depth.
-- Original-case index paths also pass through the existing content rules below;
-  path findings use `path-` plus the rule name. A token-bearing filename with a
-  harmless body is rejected. No new credential pattern or placeholder exception
-  was introduced for this path check.
+- Original-case index paths use separate `PATH_RULES`: each existing credential
+  pattern keeps its core and regex flags, but its explicit outer `\b` boundaries
+  are removed. A complete pattern is therefore found next to ASCII letters,
+  underscores or Chinese characters, on either side, anywhere in an index path.
+  Body patterns are unchanged. The path check also retains the original content
+  results, including assignment rules and invalid-data failures. Path findings
+  use `path-` plus the rule name; no new placeholder exception is introduced.
 - Media, SVG, model, archive, and binary document filenames are denied. No character
   assets or other binary files are approved in this initial repository. Ordinary
   source code, Markdown documentation, configuration, and lockfiles are allowed.
@@ -58,6 +61,14 @@ multiline or computed assignments, and ordinary personal text may evade these
 patterns. The assignment rule is lexical, not a language parser: unusual variable
 expressions or type annotations can require review. A UTF-8 text asset with no
 denied name or matching content can pass. Do not approve it solely on that basis.
+
+Path matching deliberately rejects any name containing a complete known
+credential-shaped substring, including a substring of a longer identifier. A
+legitimate identifier with that shape may consequently be rejected. Normal names
+and incomplete prefixes in the regression corpus still pass; that is not a claim
+of zero false positives. Matching is case-sensitive where the original rule is
+case-sensitive; this does not normalize or decode credentials. Prose retains its
+original Unicode word-boundary behavior, including its existing limitations.
 
 The command checks the current index only: it does not scan history, remote refs,
 untracked files, ignored files, or files staged concurrently after enumeration.
@@ -91,3 +102,7 @@ operands; fixture setup errors are similarly sanitized. Six intentionally failin
 inner test cases are captured in memory to check failure-report redaction. They
 are expected failures inside a passing regression test, not skipped tests or
 failed CI results. No token-bearing raw failure log is written or uploaded.
+F-02 tests confirm every expected path is present in the index and each indexed
+body is harmless before testing the filename matrix. They cover prefix/suffix
+combinations, case rules, clean names, body-only and combined findings, unchanged
+body semantics and safe assertion failures, using dynamic synthetic values.

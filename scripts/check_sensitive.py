@@ -46,6 +46,13 @@ CONTENT_RULES = (
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")),
     ("url-credentials", re.compile(r"\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@", re.I)),
 )
+# Paths may embed a complete credential next to letters, underscores or Unicode.
+# Reuse each core and its flags, removing only explicit outer word boundaries.
+# Keep CONTENT_RULES unchanged: prose still uses its original matching semantics.
+PATH_RULES = tuple(
+    (name, re.compile(pattern.pattern.removeprefix(r"\b").removesuffix(r"\b"), pattern.flags))
+    for name, pattern in CONTENT_RULES
+)
 ASSIGNMENT = re.compile(
     r"(?<![\w-])['\"]?(?:[A-Za-z][\w.-]*[_-])?"
     r"(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret(?:[_-]?key)?|token|password|passwd|pwd|client[_-]?secret|private[_-]?key)"
@@ -98,6 +105,14 @@ def content_violations(blob: bytes) -> set[str]:
     return rules
 
 
+def path_violations(raw_path: bytes) -> set[str]:
+    rules = content_violations(raw_path)
+    if rules & {"oversized-blob", "binary-content", "non-utf8-content"}:
+        return rules
+    text = raw_path.decode("utf-8-sig")
+    return rules | {name for name, pattern in PATH_RULES if pattern.search(text)}
+
+
 def scan(repo: Path) -> list[tuple[int, str]]:
     # Findings never retain paths: filenames can contain the secrets we detect.
     findings: set[tuple[int, str]] = set()
@@ -111,8 +126,7 @@ def scan(repo: Path) -> list[tuple[int, str]]:
         except (ValueError, UnicodeDecodeError):
             findings.add((file_number, "unreadable-index-entry"))
             continue
-        # Preserve original case for case-sensitive patterns; rules are unchanged.
-        for rule in content_violations(raw_path):
+        for rule in path_violations(raw_path):
             findings.add((file_number, "path-" + rule))
         parts = path.lower().split("/")
         if any(part in DENIED_DIRECTORIES for part in parts[:-1]):

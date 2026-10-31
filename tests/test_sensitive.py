@@ -82,6 +82,14 @@ class SensitiveIndexTests(unittest.TestCase):
     def synthetic_token(self) -> str:
         return "gh" + "p_" + "SYNTHETIC" + secrets.token_hex(18)
 
+    def assert_indexed(self, names: list[str], body: bytes) -> list[bytes]:
+        indexed = [name for name in self.git("ls-files", "-z").split(b"\0") if name]
+        self.assertTrue(set(indexed) == {name.encode("utf-8") for name in names},
+                        "Expected fixture paths are not the complete index")
+        for name in names:
+            self.assertTrue(self.git("show", ":" + name) == body, "Unexpected indexed fixture body")
+        return indexed
+
     def test_clean_source_docs_and_lock_hashes_pass(self) -> None:
         self.stage("src/neurocore/example.py", 'print("hello")\n')
         self.stage("src/neurocore/models/__init__.py", '"""Public data models."""\n')
@@ -324,6 +332,108 @@ class SensitiveIndexTests(unittest.TestCase):
                 result = unittest.TextTestRunner(stream=report).run(suite)
                 self.assertEqual(len(result.failures), 1, "Expected an intentional assertion failure")
                 self.assertTrue(value not in report.getvalue(), "Test failure report exposed a sensitive fixture")
+
+    def test_f02_complete_token_with_filename_prefixes_and_suffixes(self) -> None:
+        value = self.synthetic_token()
+        templates = (
+            "{}.txt", "config-{}.txt", "config.{}.txt", "config {}.txt",
+            "config_{}.txt", "说明{}.txt", "说明_{}.txt", "{}_backup.txt",
+            "{}说明.txt", "config{}.txt", "{}backup.txt", "说明_{}说明.txt",
+            "目录_{}/notes.txt",
+        )
+        names = [template.format(value) for template in templates]
+        body = b"harmless fixture body\n"
+        for name in names:
+            self.stage(name, body)
+        self.assert_indexed(names, body)
+        result = self.check()
+        self.assert_rejected(result, "path-github-token")
+        detected = {int(n) for n in re.findall(r"^file#(\d+): path-github-token$", result.stderr, re.M)}
+        self.assertTrue(detected == set(range(1, len(names) + 1)), "A filename boundary case escaped detection")
+        self.assert_redacted(result, value, *names)
+
+    def test_f02_filename_case_sensitivity_preserves_core_rules(self) -> None:
+        github = self.synthetic_token()
+        aws_payload = secrets.token_hex(8).upper()
+        google_payload = secrets.token_hex(18)[:35]
+        examples = (
+            ("github-token", github, True),
+            ("github-token", github[:4] + github[4:].swapcase(), True),
+            ("github-token", github.upper(), False),
+            ("aws-access-key", "AK" + "IA" + aws_payload, True),
+            ("aws-access-key", "ak" + "ia" + aws_payload, False),
+            ("aws-access-key", "AK" + "IA" + "a" + aws_payload[1:], False),
+            ("google-api-key", "AI" + "za" + google_payload, True),
+            ("google-api-key", "ai" + "za" + google_payload, False),
+        )
+        names = [f"case-{index}/说明_{value}说明.txt" for index, (_, value, _) in enumerate(examples)]
+        body = b"harmless fixture body\n"
+        for name in names:
+            self.stage(name, body)
+        indexed = self.assert_indexed(names, body)
+        expected = {(indexed.index(name.encode("utf-8")) + 1, "path-" + rule)
+                    for name, (rule, _, rejected) in zip(names, examples) if rejected}
+        result = self.check()
+        actual = {(int(number), rule) for number, rule in
+                  re.findall(r"^file#(\d+): ([a-z-]+)$", result.stderr, re.M)}
+        self.assertEqual(result.returncode, 1, "Sensitive filename cases accepted")
+        self.assertTrue(actual == expected, "Filename case rules changed or added a false positive")
+        self.assert_redacted(result, *names, *(value for _, value, _ in examples))
+
+    def test_f02_normal_and_incomplete_filenames_still_pass(self) -> None:
+        short_value = "gh" + "p_" + secrets.token_hex(9) + "a"
+        names = ["config_api_key_notes.txt", "github_token_notes.txt", "说明_配置.txt",
+                 "token_backup.txt", "config_readme.txt", "config_" + short_value + "说明.txt"]
+        body = b"harmless fixture body\n"
+        for name in names:
+            self.stage(name, body)
+        self.assert_indexed(names, body)
+        result = self.check()
+        self.assertEqual(result.returncode, 0, "A normal or incomplete filename was rejected")
+        self.assertTrue(not result.stderr, "Clean fixture reported an error")
+        self.assert_redacted(result, *names, short_value)
+
+    def test_f02_body_word_boundary_semantics_are_unchanged(self) -> None:
+        spec = importlib.util.spec_from_file_location("scanner_f02", SCANNER)
+        scanner = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(scanner)
+        value = self.synthetic_token()
+        examples = ((value, True), ("config-" + value, True), (value + "backup", True),
+                    ("config_" + value, False), ("说明" + value, False),
+                    (value + "_backup", False), (value + "说明", False))
+        for index, (body, expected) in enumerate(examples):
+            with self.subTest(case=index):
+                found = "github-token" in scanner.content_violations(body.encode("utf-8"))
+                self.assertTrue(found == expected, "Original body matching semantics changed")
+
+    def test_f02_sensitive_body_only_is_still_rejected(self) -> None:
+        value = self.synthetic_token()
+        self.stage("plain.txt", value)
+        self.assert_indexed(["plain.txt"], value.encode("utf-8"))
+        result = self.check()
+        self.assert_rejected(result, "github-token")
+        self.assertTrue("file#1: github-token" in result.stderr.splitlines(), "Body finding missing")
+        self.assertTrue("path-github-token" not in result.stderr, "Harmless path was misclassified")
+        self.assert_redacted(result, value, "plain.txt")
+
+    def test_f02_sensitive_body_and_embedded_filename_are_rejected(self) -> None:
+        value = self.synthetic_token()
+        name = "说明_" + value + "_backup.txt"
+        self.stage(name, value)
+        self.assert_indexed([name], value.encode("utf-8"))
+        result = self.check()
+        self.assert_rejected(result, "path-github-token")
+        self.assertTrue("file#1: github-token" in result.stderr.splitlines(), "Body finding missing")
+        self.assert_redacted(result, value, name)
+
+    def test_f02_index_assertion_failure_does_not_echo_filename(self) -> None:
+        value = self.synthetic_token()
+        report = io.StringIO()
+        callback = lambda: self.assert_indexed(["说明_" + value + ".txt"], b"harmless")
+        suite = unittest.TestSuite([unittest.FunctionTestCase(callback)])
+        result = unittest.TextTestRunner(stream=report).run(suite)
+        self.assertEqual(len(result.failures), 1, "Expected an intentional index assertion failure")
+        self.assertTrue(value not in report.getvalue(), "Index assertion report exposed a sensitive fixture")
 
 
 if __name__ == "__main__":

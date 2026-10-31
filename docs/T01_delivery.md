@@ -1,10 +1,81 @@
 # T-01 delivery record
 
-Status: R-01 independent acceptance found F-01 and marked T-01 **NO-GO**.
-The scoped remediation below awaits C2 retest; prior automated CI success did
-not establish safe diagnostics. Do not merge or start T-02 based on this draft.
+Status: R-01-F01 confirmed the original F-01 diagnostic leak fix, but identified
+F-02 filename boundary misses. T-01 remains pending independent acceptance.
+This second scoped repair awaits C2 retest. Do not merge or start T-02. If C2
+returns NO-GO again, stop and request a user decision on the scanner approach;
+do not autonomously submit a third patch round.
 
-## T-01-F01: secret-bearing filenames in diagnostics
+## T-01-F02: filename credential boundaries
+
+Fixed failing baseline: `e40535e4e08a0d0a78e5c872ab36ee094af9d7a5`.
+The path check reused prose patterns containing Unicode `\b`. Underscores,
+ASCII letters and Chinese characters are word characters, so an intact token
+next to them could lose the required boundary. Baseline reproduction confirmed
+the misses while token echo count remained zero: F-01 redaction did not regress.
+
+`PATH_RULES` now derives a separate pattern from each existing content pattern
+by removing only an explicit leading/trailing `\b`. It preserves core character
+classes, length thresholds, regex flags and any internal boundaries; it does not
+globally replace boundaries or modify `CONTENT_RULES`. `path_violations` unions
+these matches with the previous checks and preserves failures for invalid or
+oversized data. No surrounding filename character can block a match of a
+complete current credential core. All path components retain their original case.
+
+One dynamically generated, unchanged GitHub-shaped value was used across the
+matrix below. Each test confirms the complete expected Git-index path set and
+reads each indexed blob to verify its harmless body. The scan must return 1 and
+report `path-github-token` for every index-entry number, without echoing the value
+or any raw path. No raw token-bearing result or complete fixed fixture is saved.
+
+| Filename template | Baseline detects | Repaired result |
+| --- | --- | --- |
+| `<Token>.txt` | Yes | Rejected |
+| `config-<Token>.txt` | Yes | Rejected |
+| `config.<Token>.txt` | Yes | Rejected |
+| `config <Token>.txt` | Yes | Rejected |
+| `config_<Token>.txt` | No | Rejected |
+| `说明<Token>.txt` | No | Rejected |
+| `说明_<Token>.txt` | No | Rejected |
+| `<Token>_backup.txt` | No | Rejected |
+| `<Token>说明.txt` | No | Rejected |
+| `config<Token>.txt` | No | Rejected |
+| `<Token>backup.txt` | Yes | Rejected |
+| `说明_<Token>说明.txt` | No | Rejected |
+| `目录_<Token>/notes.txt` | No | Rejected |
+
+Additional actual coverage:
+
+- Mixed-case GitHub payloads remain valid shapes; uppercase GitHub prefixes,
+  lowercase AWS prefixes/payloads and altered Google prefixes do not match rules
+  that were case-sensitive. Findings equal the expected subset, not merely a
+  global nonzero result.
+- Six normal/incomplete filenames pass, including an explicitly too-short
+  credential payload. Body-only and body-plus-embedded-name secrets still fail.
+- The original body boundary behavior is asserted independently. AST comparison
+  also confirms eleven original definitions, including content rules, body
+  checking, Git reading, CLI errors and diagnostic output, are unchanged.
+- All F-01 error/redaction tests remain. An extra in-memory intentionally failing
+  index assertion verifies the new fixture check cannot print its dynamic value.
+
+Local Windows / Python 3.12.16 / uv 0.13.6: `uv sync --locked`, `uv lock --check`,
+the full test suite (**36 passed, zero skipped, 20.464s**) and `uv build` passed.
+All original 29 test methods are retained; seven F-02 methods were added. The
+exact repair SHA and actual Windows CI run are recorded in the existing
+[Draft PR #1](https://github.com/Zhong751/neurocore-open/pull/1) delivery description;
+older CI runs below do not establish F-02 acceptance.
+
+Only the scanner, its tests, this report and `docs/security_checks.md` change.
+No dependency, project structure, workflow permission, license, private project
+or Zealor data is changed. File-number diagnostics and Git-index scope remain.
+No false positive appeared in the six normal/incomplete cases. Deliberately
+broader substring matching can reject an otherwise legitimate longer filename
+that contains a complete credential shape; this is the filename policy, not
+credential validation. Unknown, encoded/split credentials, ordinary personal
+text and history outside the index remain outside reliable detection. Body
+semantics retain their existing limits by design.
+
+## T-01-F01: secret-bearing filenames in diagnostics (historical)
 
 Reviewed baseline: `45bcc2077ba7956670518a394df5508ffe0c63d5`. The baseline printed
 `json.dumps(path)` for every finding. JSON escapes control characters but leaves
